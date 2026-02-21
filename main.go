@@ -2,159 +2,165 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"log"
-	"os"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/joho/godotenv"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
 )
 
 type Todo struct {
-	ID        primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
-	Completed bool               `json:"completed"`
-	Body      string             `json:"body"`
+	ID        string `json:"id" dynamodbav:"id"`
+	Completed bool   `json:"completed" dynamodbav:"completed"`
+	Body      string `json:"body" dynamodbav:"body"`
 }
 
-var collection *mongo.Collection
+var db *dynamodb.Client
+var tableName = "todos"
 
-func main() {
-	fmt.Println("hello world")
-
-	if os.Getenv("ENV") != "production" {
-		// Load the .env file if not in production
-		err := godotenv.Load(".env")
-		if err != nil {
-			log.Fatal("Error loading .env file:", err)
-		}
-	}
-
-	MONGODB_URI := os.Getenv("MONGODB_URI")
-	clientOptions := options.Client().ApplyURI(MONGODB_URI)
-	client, err := mongo.Connect(context.Background(), clientOptions)
-
+func init() {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Unable to load AWS config:", err)
 	}
-
-	defer client.Disconnect(context.Background())
-
-	err = client.Ping(context.Background(), nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Connected to MONGODB ATLAS")
-
-	collection = client.Database("golang_db").Collection("todos")
-
-	app := fiber.New()
-
-	// app.Use(cors.New(cors.Config{
-	// 	AllowOrigins: "http://localhost:5173",
-	// 	AllowHeaders: "Origin,Content-Type,Accept",
-	// }))
-
-	app.Get("/api/todos", getTodos)
-	app.Post("/api/todos", createTodo)
-	app.Patch("/api/todos/:id", updateTodo)
-	app.Delete("/api/todos/:id", deleteTodo)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "5000"
-	}
-
-	if os.Getenv("ENV") == "production" {
-		app.Static("/", "./client/dist")
-	}
-
-	log.Fatal(app.Listen("0.0.0.0:" + port))
-
+	db = dynamodb.NewFromConfig(cfg)
 }
 
-func getTodos(c *fiber.Ctx) error {
+func handler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+
+	switch request.RouteKey {
+
+	case "GET /api/todos":
+		return getTodos(ctx)
+
+	case "POST /api/todos":
+		return createTodo(ctx, request)
+
+	case "PATCH /api/todos/{id}":
+		id := request.PathParameters["id"]
+		return updateTodo(ctx, id)
+
+	case "DELETE /api/todos/{id}":
+		id := request.PathParameters["id"]
+		return deleteTodo(ctx, id)
+
+	case "OPTIONS /api/todos":
+		return response(200, "")
+
+	case "OPTIONS /api/todos/{id}":
+		return response(200, "")
+
+	default:
+		return response(404, `{"error":"Not Found"}`)
+	}
+}
+
+func getTodos(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
+
+	result, err := db.Scan(ctx, &dynamodb.ScanInput{
+		TableName: &tableName,
+	})
+	if err != nil {
+		return response(500, err.Error())
+	}
+
 	var todos []Todo
-
-	cursor, err := collection.Find(context.Background(), bson.M{})
-
+	err = attributevalue.UnmarshalListOfMaps(result.Items, &todos)
 	if err != nil {
-		return err
+		return response(500, err.Error())
 	}
 
-	defer cursor.Close(context.Background())
-
-	for cursor.Next(context.Background()) {
-		var todo Todo
-		if err := cursor.Decode(&todo); err != nil {
-			return err
-		}
-		todos = append(todos, todo)
-	}
-
-	return c.JSON(todos)
+	body, _ := json.Marshal(todos)
+	return response(200, string(body))
 }
 
-func createTodo(c *fiber.Ctx) error {
-	todo := new(Todo)
-	// {id:0,completed:false,body:""}
+func createTodo(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 
-	if err := c.BodyParser(todo); err != nil {
-		return err
+	var todo Todo
+	if err := json.Unmarshal([]byte(request.Body), &todo); err != nil {
+		return response(400, "Invalid request body")
 	}
 
 	if todo.Body == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "Todo body cannot be empty"})
+		return response(400, "Todo body cannot be empty")
 	}
 
-	insertResult, err := collection.InsertOne(context.Background(), todo)
+	todo.ID = uuid.New().String()
+	todo.Completed = false
+
+	item, err := attributevalue.MarshalMap(todo)
 	if err != nil {
-		return err
+		return response(500, err.Error())
 	}
 
-	todo.ID = insertResult.InsertedID.(primitive.ObjectID)
+	_, err = db.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &tableName,
+		Item:      item,
+	})
+	if err != nil {
+		return response(500, err.Error())
+	}
 
-	return c.Status(201).JSON(todo)
+	body, _ := json.Marshal(todo)
+	return response(201, string(body))
 }
 
-func updateTodo(c *fiber.Ctx) error {
-	id := c.Params("id")
-	objectID, err := primitive.ObjectIDFromHex(id)
+func updateTodo(ctx context.Context, id string) (events.APIGatewayV2HTTPResponse, error) {
 
+	_, err := db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &tableName,
+		Key: map[string]types.AttributeValue{
+			"id": &types.AttributeValueMemberS{Value: id},
+		},
+		UpdateExpression: awsString("SET completed = :val"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":val": &types.AttributeValueMemberBOOL{Value: true},
+		},
+	})
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid todo ID"})
+		return response(500, err.Error())
 	}
 
-	filter := bson.M{"_id": objectID}
-	update := bson.M{"$set": bson.M{"completed": true}}
-
-	_, err = collection.UpdateOne(context.Background(), filter, update)
-	if err != nil {
-		return err
-	}
-
-	return c.Status(200).JSON(fiber.Map{"success": true})
-
+	return response(200, `{"success":true}`)
 }
 
-func deleteTodo(c *fiber.Ctx) error {
-	id := c.Params("id")
-	objectID, err := primitive.ObjectIDFromHex(id)
+func deleteTodo(ctx context.Context, id string) (events.APIGatewayV2HTTPResponse, error) {
 
+	_, err := db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &tableName,
+		Key: map[string]types.AttributeValue{
+			"id": &types.AttributeValueMemberS{Value: id},
+		},
+	})
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid todo ID"})
+		return response(500, err.Error())
 	}
 
-	filter := bson.M{"_id": objectID}
-	_, err = collection.DeleteOne(context.Background(), filter)
+	return response(200, `{"success":true}`)
+}
 
-	if err != nil {
-		return err
-	}
+func response(status int, body string) (events.APIGatewayV2HTTPResponse, error) {
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: status,
+		Headers: map[string]string{
+			"Content-Type":                 "application/json",
+			"Access-Control-Allow-Origin":  "*",
+			"Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type",
+		},
+		Body: body,
+	}, nil
+}
 
-	return c.Status(200).JSON(fiber.Map{"success": true})
+func awsString(s string) *string {
+	return &s
+}
+
+func main() {
+	lambda.Start(handler)
 }

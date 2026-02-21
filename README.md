@@ -28,3 +28,22 @@ ENV=development
 ```shell
 go run main.go
 ```
+
+Packages installed:
+github.com/aws/aws-lambda-go/lambda
+github.com/aws/aws-lambda-go/events
+github.com/aws/aws-sdk-go-v2/config
+github.com/aws/aws-sdk-go-v2/service/dynamodb
+github.com/aws/aws-sdk-go-v2/service/dynamodb/types
+github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue
+github.com/google/uuid
+
+to build lamdazip:
+$env:GOOS="linux"
+$env:GOARCH="amd64"
+go build -o bootstrap
+Compress-Archive bootstrap function.zip -Force
+
+for client:
+npm install
+npm run build
