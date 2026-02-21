@@ -47,3 +47,5 @@ Compress-Archive bootstrap function.zip -Force
 for client:
 npm install
 npm run build
+
+for dev testing--> npm run dev
